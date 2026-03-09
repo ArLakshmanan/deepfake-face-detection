@@ -1,0 +1,11 @@
+streamlit
+torch
+torchvision
+timm
+opencv-python-headless
+matplotlib
+pillow
+grad-cam
+scikit-image
+pywavelets
+scipy
