@@ -1,11 +1,6 @@
-streamlit
-torch
-torchvision
-timm
-opencv-python-headless
-matplotlib
-pillow
-grad-cam
-scikit-image
-pywavelets
-scipy
+streamlit==1.33.0
+numpy==1.26.4
+matplotlib==3.8.3
+pillow==10.2.0
+scikit-image==0.22.0
+pywavelets==1.5.0
