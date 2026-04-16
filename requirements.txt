@@ -5,7 +5,7 @@ timm
 opencv-python-headless
 matplotlib
 pillow
-grad-cam
 scikit-image
 pywavelets
 scipy
+pytorch-grad-cam
