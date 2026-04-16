@@ -5,13 +5,13 @@ import timm
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+import pywt
 
 from torchvision import transforms
 from PIL import Image
-import pywt
 
 # -----------------------------
-# MODEL
+# MODEL ARCHITECTURE
 # -----------------------------
 
 class DeepFakeNet(nn.Module):
@@ -26,13 +26,22 @@ class DeepFakeNet(nn.Module):
             num_classes=0
         )
 
-        self.fc = nn.Linear(1536,2)
+        self.classifier = nn.Sequential(
+
+            nn.Linear(1536,512),
+            nn.BatchNorm1d(512),
+            nn.GELU(),
+            nn.Dropout(0.5),
+
+            nn.Linear(512,2)
+
+        )
 
     def forward(self,x):
 
         x = self.backbone(x)
 
-        return self.fc(x)
+        return self.classifier(x)
 
 
 # -----------------------------
@@ -126,15 +135,15 @@ def geometry_map(img):
 # STREAMLIT UI
 # -----------------------------
 
-st.title("🔍 DeepFake Face Detection")
+st.title("🔍 DeepFake Face Detection System")
 
 st.write(
 "Upload a face image to detect whether it is **REAL or FAKE**."
 )
 
 uploaded_file = st.file_uploader(
-"Upload Image",
-type=["jpg","jpeg","png"]
+    "Upload Image",
+    type=["jpg","jpeg","png"]
 )
 
 if uploaded_file:
@@ -142,8 +151,6 @@ if uploaded_file:
     image = Image.open(uploaded_file).convert("RGB")
 
     img_np = np.array(image)
-
-    # MODEL INPUT
 
     input_tensor = transform(image).unsqueeze(0)
 
@@ -154,7 +161,6 @@ if uploaded_file:
         probs = torch.softmax(output,dim=1)[0]
 
     fake_prob = probs[0].item()
-
     real_prob = probs[1].item()
 
     prediction = "REAL" if real_prob > fake_prob else "FAKE"
@@ -162,7 +168,7 @@ if uploaded_file:
     confidence = max(fake_prob,real_prob)
 
 
-    # GENERATE ANALYSIS MAPS
+    # Generate analysis maps
 
     wave = wavelet_map(img_np)
 
@@ -173,16 +179,23 @@ if uploaded_file:
     entropy = image_entropy(gray)
 
 
-    st.subheader("Detection Result")
+    # Display result
 
-    st.success(f"Prediction: {prediction}")
+    st.subheader("Prediction Result")
 
-    st.write(f"Confidence: {confidence*100:.2f}%")
+    if prediction == "REAL":
+
+        st.success(f"Prediction: REAL ({confidence*100:.2f}%)")
+
+    else:
+
+        st.error(f"Prediction: FAKE ({confidence*100:.2f}%)")
+
 
     st.write(f"Image Entropy: {entropy:.3f}")
 
 
-    # VISUAL DISPLAY
+    # Visualization layout
 
     col1,col2 = st.columns(2)
 
@@ -201,8 +214,6 @@ if uploaded_file:
         )
 
     with col2:
-
-        # HISTOGRAM
 
         fig,ax = plt.subplots()
 
