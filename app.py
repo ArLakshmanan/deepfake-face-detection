@@ -8,12 +8,11 @@ import matplotlib.pyplot as plt
 
 from torchvision import transforms
 from PIL import Image
-from skimage.measure import shannon_entropy
 import pywt
 
-# -------------------------------
+# -----------------------------
 # MODEL
-# -------------------------------
+# -----------------------------
 
 class DeepFakeNet(nn.Module):
 
@@ -36,21 +35,21 @@ class DeepFakeNet(nn.Module):
         return self.fc(x)
 
 
-# -------------------------------
+# -----------------------------
 # LOAD MODEL
-# -------------------------------
+# -----------------------------
 
 @st.cache_resource
 def load_model():
 
     model = DeepFakeNet()
 
-    state = torch.load(
+    state_dict = torch.load(
         "deepfake_detector_model.pth",
         map_location="cpu"
     )
 
-    model.load_state_dict(state)
+    model.load_state_dict(state_dict)
 
     model.eval()
 
@@ -59,9 +58,10 @@ def load_model():
 
 model = load_model()
 
-# -------------------------------
-# TRANSFORM
-# -------------------------------
+
+# -----------------------------
+# IMAGE TRANSFORM
+# -----------------------------
 
 transform = transforms.Compose([
     transforms.Resize((224,224)),
@@ -72,9 +72,27 @@ transform = transforms.Compose([
     )
 ])
 
-# -------------------------------
+
+# -----------------------------
+# ENTROPY FUNCTION
+# -----------------------------
+
+def image_entropy(gray):
+
+    hist = cv2.calcHist([gray],[0],None,[256],[0,256])
+
+    hist = hist / hist.sum()
+
+    hist = hist[hist>0]
+
+    entropy = -np.sum(hist*np.log2(hist))
+
+    return entropy
+
+
+# -----------------------------
 # WAVELET MAP
-# -------------------------------
+# -----------------------------
 
 def wavelet_map(img):
 
@@ -90,9 +108,10 @@ def wavelet_map(img):
 
     return hf.astype(np.uint8)
 
-# -------------------------------
+
+# -----------------------------
 # EDGE MAP
-# -------------------------------
+# -----------------------------
 
 def geometry_map(img):
 
@@ -103,19 +122,19 @@ def geometry_map(img):
     return edges
 
 
-# -------------------------------
+# -----------------------------
 # STREAMLIT UI
-# -------------------------------
+# -----------------------------
 
-st.title("DeepFake Face Detection")
+st.title("🔍 DeepFake Face Detection")
 
 st.write(
-"Upload a face image to detect whether it is REAL or FAKE"
+"Upload a face image to detect whether it is **REAL or FAKE**."
 )
 
 uploaded_file = st.file_uploader(
 "Upload Image",
-type=["jpg","png","jpeg"]
+type=["jpg","jpeg","png"]
 )
 
 if uploaded_file:
@@ -124,66 +143,83 @@ if uploaded_file:
 
     img_np = np.array(image)
 
-    # prediction
+    # MODEL INPUT
+
     input_tensor = transform(image).unsqueeze(0)
 
     with torch.no_grad():
 
-        out = model(input_tensor)
+        output = model(input_tensor)
 
-        prob = torch.softmax(out,dim=1)[0]
+        probs = torch.softmax(output,dim=1)[0]
 
-    fake_prob = prob[0].item()
+    fake_prob = probs[0].item()
 
-    real_prob = prob[1].item()
+    real_prob = probs[1].item()
 
     prediction = "REAL" if real_prob > fake_prob else "FAKE"
 
-    confidence = max(real_prob,fake_prob)
+    confidence = max(fake_prob,real_prob)
 
-    # maps
+
+    # GENERATE ANALYSIS MAPS
+
     wave = wavelet_map(img_np)
 
     edges = geometry_map(img_np)
 
-    entropy = shannon_entropy(cv2.cvtColor(img_np,cv2.COLOR_BGR2GRAY))
+    gray = cv2.cvtColor(img_np,cv2.COLOR_BGR2GRAY)
 
-    # display
+    entropy = image_entropy(gray)
+
+
+    st.subheader("Detection Result")
+
+    st.success(f"Prediction: {prediction}")
+
+    st.write(f"Confidence: {confidence*100:.2f}%")
+
+    st.write(f"Image Entropy: {entropy:.3f}")
+
+
+    # VISUAL DISPLAY
+
     col1,col2 = st.columns(2)
 
     with col1:
 
         st.image(
             img_np,
-            caption=f"Prediction: {prediction} | Confidence: {confidence*100:.2f}%"
+            caption="Original Image",
+            use_container_width=True
         )
 
         st.image(
             wave,
-            caption="Wavelet High Frequency Map"
+            caption="Wavelet High Frequency Map",
+            use_container_width=True
         )
 
     with col2:
 
+        # HISTOGRAM
+
         fig,ax = plt.subplots()
 
-        hist = cv2.calcHist(
-            [cv2.cvtColor(img_np,cv2.COLOR_BGR2GRAY)],
-            [0],
-            None,
-            [256],
-            [0,256]
-        )
+        hist = cv2.calcHist([gray],[0],None,[256],[0,256])
 
         ax.plot(hist)
 
         ax.set_title("Pixel Intensity Histogram")
 
+        ax.set_xlabel("Pixel Value")
+
+        ax.set_ylabel("Frequency")
+
         st.pyplot(fig)
 
         st.image(
             edges,
-            caption="Geometry / Edge Map"
+            caption="Geometry Edge Map",
+            use_container_width=True
         )
-
-    st.write(f"Image Entropy: {entropy:.3f}")
