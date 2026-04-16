@@ -8,20 +8,11 @@ import matplotlib.pyplot as plt
 
 from torchvision import transforms
 from PIL import Image
-
-from scipy.stats import skew, kurtosis
-from skimage.feature import graycomatrix, graycoprops
-from skimage.filters import sobel
-from skimage.measure import shannon_entropy
 import pywt
 
-from pytorch_grad_cam import GradCAM
-from pytorch_grad_cam.utils.image import show_cam_on_image
-
-
-# =============================
+# -----------------------------
 # MODEL
-# =============================
+# -----------------------------
 
 class DeepFakeNet(nn.Module):
 
@@ -35,26 +26,18 @@ class DeepFakeNet(nn.Module):
             num_classes=0
         )
 
-        self.classifier = nn.Sequential(
-
-            nn.Linear(1536,512),
-            nn.BatchNorm1d(512),
-            nn.GELU(),
-            nn.Dropout(0.5),
-
-            nn.Linear(512,2)
-        )
+        self.fc = nn.Linear(1536,2)
 
     def forward(self,x):
 
         x = self.backbone(x)
 
-        return self.classifier(x)
+        return self.fc(x)
 
 
-# =============================
+# -----------------------------
 # LOAD MODEL
-# =============================
+# -----------------------------
 
 @st.cache_resource
 def load_model():
@@ -76,9 +59,9 @@ def load_model():
 model = load_model()
 
 
-# =============================
+# -----------------------------
 # IMAGE TRANSFORM
-# =============================
+# -----------------------------
 
 transform = transforms.Compose([
     transforms.Resize((224,224)),
@@ -90,64 +73,63 @@ transform = transforms.Compose([
 ])
 
 
-# =============================
-# FEATURE EXTRACTION
-# =============================
+# -----------------------------
+# ENTROPY FUNCTION
+# -----------------------------
 
-def extract_features(img):
+def image_entropy(gray):
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    hist = cv2.calcHist([gray],[0],None,[256],[0,256])
 
-    sk = skew(gray.flatten())
+    hist = hist / hist.sum()
 
-    kt = kurtosis(gray.flatten())
+    hist = hist[hist>0]
 
-    ent = shannon_entropy(gray)
+    entropy = -np.sum(hist*np.log2(hist))
 
-    glcm = graycomatrix(
-        gray,
-        distances=[1],
-        angles=[0],
-        levels=256,
-        symmetric=True,
-        normed=True
-    )
+    return entropy
 
-    contrast = graycoprops(glcm,'contrast')[0,0]
 
-    homogeneity = graycoprops(glcm,'homogeneity')[0,0]
+# -----------------------------
+# WAVELET MAP
+# -----------------------------
 
-    gradient = sobel(gray)
+def wavelet_map(img):
 
-    grad_mean = np.mean(gradient)
+    gray = cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
 
-    coeffs = pywt.dwt2(gray,'haar')
+    coeffs = pywt.dwt2(gray,"haar")
 
     cA,(cH,cV,cD) = coeffs
 
-    wavelet_energy = np.sum(cH**2 + cV**2 + cD**2)
+    hf = np.abs(cH)+np.abs(cV)+np.abs(cD)
 
-    return {
-        "Skewness": sk,
-        "Kurtosis": kt,
-        "Entropy": ent,
-        "Texture Contrast": contrast,
-        "Texture Homogeneity": homogeneity,
-        "Gradient Mean": grad_mean,
-        "Wavelet Energy": wavelet_energy
-    }
+    hf = cv2.normalize(hf,None,0,255,cv2.NORM_MINMAX)
+
+    return hf.astype(np.uint8)
 
 
-# =============================
+# -----------------------------
+# EDGE MAP
+# -----------------------------
+
+def geometry_map(img):
+
+    gray = cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
+
+    edges = cv2.Canny(gray,100,200)
+
+    return edges
+
+
+# -----------------------------
 # STREAMLIT UI
-# =============================
+# -----------------------------
 
-st.title("🔍 DeepFake Detection Dashboard")
+st.title("🔍 DeepFake Face Detection")
 
-st.markdown(
-"""
-Upload an image to analyze whether it is **Real or DeepFake** using a CNN-based model.
-"""
+st.write(
+"Upload a face image to detect whether it is **REAL or FAKE**."
 )
 
 uploaded_file = st.file_uploader(
@@ -155,20 +137,13 @@ uploaded_file = st.file_uploader(
 type=["jpg","jpeg","png"]
 )
 
-
 if uploaded_file:
 
     image = Image.open(uploaded_file).convert("RGB")
 
     img_np = np.array(image)
 
-    st.subheader("Uploaded Image")
-
-    st.image(img_np,use_container_width=True)
-
-    # =============================
     # MODEL INPUT
-    # =============================
 
     input_tensor = transform(image).unsqueeze(0)
 
@@ -187,135 +162,64 @@ if uploaded_file:
     confidence = max(fake_prob,real_prob)
 
 
-    # =============================
-    # RESULT
-    # =============================
+    # GENERATE ANALYSIS MAPS
 
-    st.subheader("Prediction Result")
+    wave = wavelet_map(img_np)
 
-    if prediction == "REAL":
+    edges = geometry_map(img_np)
 
-        st.success("REAL IMAGE")
+    gray = cv2.cvtColor(img_np,cv2.COLOR_BGR2GRAY)
 
-    else:
-
-        st.error("FAKE IMAGE")
-
-    st.write(f"Confidence: {confidence:.3f}")
+    entropy = image_entropy(gray)
 
 
-    # =============================
-    # PROBABILITY CHART
-    # =============================
+    st.subheader("Detection Result")
 
-    st.subheader("Prediction Probability")
+    st.success(f"Prediction: {prediction}")
 
-    labels = ["Fake","Real"]
+    st.write(f"Confidence: {confidence*100:.2f}%")
 
-    values = [fake_prob,real_prob]
-
-    fig,ax = plt.subplots()
-
-    ax.bar(labels,values)
-
-    ax.set_ylabel("Probability")
-
-    st.pyplot(fig)
+    st.write(f"Image Entropy: {entropy:.3f}")
 
 
-    # =============================
-    # GRADCAM
-    # =============================
+    # VISUAL DISPLAY
 
-    st.subheader("GradCAM Visualization")
+    col1,col2 = st.columns(2)
 
-    target_layer = model.backbone.conv_head
+    with col1:
 
-    cam = GradCAM(model=model,target_layers=[target_layer])
+        st.image(
+            img_np,
+            caption="Original Image",
+            use_container_width=True
+        )
 
-    grayscale_cam = cam(input_tensor=input_tensor)[0]
+        st.image(
+            wave,
+            caption="Wavelet High Frequency Map",
+            use_container_width=True
+        )
 
-    # FIX: Resize heatmap to image size
-    grayscale_cam = cv2.resize(
-        grayscale_cam,
-        (img_np.shape[1], img_np.shape[0])
-    )
+    with col2:
 
-    img_float = np.float32(img_np)/255
+        # HISTOGRAM
 
-    cam_image = show_cam_on_image(
-        img_float,
-        grayscale_cam,
-        use_rgb=True
-    )
+        fig,ax = plt.subplots()
 
-    st.image(cam_image)
+        hist = cv2.calcHist([gray],[0],None,[256],[0,256])
 
+        ax.plot(hist)
 
-    # =============================
-    # FEATURES
-    # =============================
+        ax.set_title("Pixel Intensity Histogram")
 
-    features = extract_features(img_np)
+        ax.set_xlabel("Pixel Value")
 
-    st.subheader("Image Statistical Parameters")
+        ax.set_ylabel("Frequency")
 
-    for k,v in features.items():
+        st.pyplot(fig)
 
-        st.write(f"{k}: {v:.4f}")
-
-
-    # =============================
-    # FEATURE VISUALIZATION
-    # =============================
-
-    st.subheader("Feature Visualization")
-
-    labels = list(features.keys())
-
-    values = list(features.values())
-
-    fig,ax = plt.subplots(figsize=(8,4))
-
-    ax.bar(labels,values)
-
-    ax.set_xticklabels(labels,rotation=45)
-
-    st.pyplot(fig)
-
-
-    # =============================
-    # EXPLANATION
-    # =============================
-
-    st.subheader("Feature Explanation")
-
-    st.markdown("""
-**Skewness** – Asymmetry of pixel intensity distribution.
-
-**Kurtosis** – Sharpness of pixel intensity distribution.
-
-**Entropy** – Randomness in the image.
-
-**Texture (GLCM)** – Measures spatial texture patterns.
-
-**Gradient** – Represents edge intensity.
-
-**Wavelet Energy** – Captures high-frequency artifacts common in deepfake images.
-""")
-
-
-# =============================
-# SIDEBAR
-# =============================
-
-st.sidebar.title("Model Information")
-
-st.sidebar.markdown("""
-Architecture: EfficientNet-B3  
-Input Size: 224x224  
-Classes: Real / Fake  
-Framework: PyTorch  
-
-This system detects manipulated facial images generated using deepfake techniques.
-""")
+        st.image(
+            edges,
+            caption="Geometry Edge Map",
+            use_container_width=True
+        )
