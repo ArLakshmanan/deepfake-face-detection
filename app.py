@@ -1,9 +1,90 @@
 import streamlit as st
+import torch
+import torch.nn as nn
+import timm
+import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+
+from torchvision import transforms
 from PIL import Image
+
+from scipy.stats import skew, kurtosis
+from skimage.feature import graycomatrix, graycoprops
+from skimage.filters import sobel
 from skimage.measure import shannon_entropy
 import pywt
+
+# =============================
+# MODEL
+# =============================
+
+class DeepFakeNet(nn.Module):
+
+    def __init__(self):
+
+        super().__init__()
+
+        self.backbone = timm.create_model(
+            "efficientnet_b3",
+            pretrained=False,
+            num_classes=0
+        )
+
+        self.classifier = nn.Sequential(
+
+            nn.Linear(1536,512),
+            nn.BatchNorm1d(512),
+            nn.GELU(),
+            nn.Dropout(0.5),
+
+            nn.Linear(512,2)
+        )
+
+    def forward(self,x):
+
+        x = self.backbone(x)
+
+        return self.classifier(x)
+
+
+# =============================
+# LOAD MODEL
+# =============================
+
+@st.cache_resource
+def load_model():
+
+    model = DeepFakeNet()
+
+    state_dict = torch.load(
+        "deepfake_detector_model.pth",
+        map_location="cpu"
+    )
+
+    model.load_state_dict(state_dict)
+
+    model.eval()
+
+    return model
+
+
+model = load_model()
+
+
+# =============================
+# IMAGE TRANSFORM
+# =============================
+
+transform = transforms.Compose([
+    transforms.Resize((224,224)),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        [0.485,0.456,0.406],
+        [0.229,0.224,0.225]
+    )
+])
+
 
 # =============================
 # FEATURE EXTRACTION
@@ -11,113 +92,188 @@ import pywt
 
 def extract_features(img):
 
-    # Convert to grayscale (NO cv2)
-    gray = np.mean(img, axis=2).astype(np.uint8)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    # 1. Entropy
-    entropy = shannon_entropy(gray)
+    sk = skew(gray.flatten())
+    kt = kurtosis(gray.flatten())
+    ent = shannon_entropy(gray)
 
-    # 2. Wavelet Energy
-    coeffs = pywt.dwt2(gray, 'haar')
-    cA, (cH, cV, cD) = coeffs
+    glcm = graycomatrix(
+        gray,
+        distances=[1],
+        angles=[0],
+        levels=256,
+        symmetric=True,
+        normed=True
+    )
+
+    contrast = graycoprops(glcm,'contrast')[0,0]
+    homogeneity = graycoprops(glcm,'homogeneity')[0,0]
+
+    gradient = sobel(gray)
+    grad_mean = np.mean(gradient)
+
+    coeffs = pywt.dwt2(gray,'haar')
+    cA,(cH,cV,cD) = coeffs
+
     wavelet_energy = np.sum(cH**2 + cV**2 + cD**2)
 
-    # 3. Geometry (Aspect Ratio)
-    h, w = gray.shape
-    aspect_ratio = w / h
+    return {
+        "Skewness": sk,
+        "Kurtosis": kt,
+        "Entropy": ent,
+        "Texture Contrast": contrast,
+        "Texture Homogeneity": homogeneity,
+        "Gradient Mean": grad_mean,
+        "Wavelet Energy": wavelet_energy
+    }
 
-    return entropy, wavelet_energy, aspect_ratio
+
+# =============================
+# WAVELET MAP
+# =============================
+
+def generate_wavelet_map(img):
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    coeffs = pywt.dwt2(gray,'haar')
+
+    cA,(cH,cV,cD) = coeffs
+
+    hf = np.abs(cH) + np.abs(cV) + np.abs(cD)
+
+    hf = cv2.normalize(hf,None,0,255,cv2.NORM_MINMAX)
+
+    return hf
+
+
+# =============================
+# ENTROPY HISTOGRAM
+# =============================
+
+def generate_entropy_histogram(img):
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    hist = cv2.calcHist([gray],[0],None,[256],[0,256])
+
+    return hist
+
+
+# =============================
+# GEOMETRY MAP
+# =============================
+
+def generate_geometry_map(img):
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    edges = cv2.Canny(gray,100,200)
+
+    return edges
 
 
 # =============================
 # STREAMLIT UI
 # =============================
 
-st.title("🔍 DeepFake Detection (Lightweight)")
+st.title("DeepFake Detection System")
 
-st.markdown("""
-This system detects **Real vs Fake images** using:
-- Entropy
-- Wavelet Energy
-- Image Geometry
-""")
+st.write(
+"Upload an image to detect whether it is REAL or FAKE."
+)
 
 uploaded_file = st.file_uploader(
-    "Upload Image",
-    type=["jpg", "jpeg", "png"]
+"Upload Image",
+type=["jpg","jpeg","png"]
 )
+
 
 if uploaded_file:
 
     image = Image.open(uploaded_file).convert("RGB")
+
     img_np = np.array(image)
 
-    st.subheader("Uploaded Image")
-    st.image(img_np, use_container_width=True)
-
     # =============================
-    # FEATURE EXTRACTION
+    # MODEL PREDICTION
     # =============================
 
-    entropy, wavelet, ratio = extract_features(img_np)
+    input_tensor = transform(image).unsqueeze(0)
+
+    with torch.no_grad():
+
+        output = model(input_tensor)
+
+        probs = torch.softmax(output,dim=1)[0]
+
+    fake_prob = probs[0].item()
+    real_prob = probs[1].item()
+
+    prediction = "REAL" if real_prob > fake_prob else "FAKE"
+
+    confidence = max(fake_prob,real_prob)
+
 
     # =============================
-    # CLASSIFICATION LOGIC
+    # GENERATE VISUALS
     # =============================
 
-    if (entropy < 6.5) or (wavelet > 1e6) or (ratio < 0.7 or ratio > 1.5):
-        prediction = "FAKE"
-        confidence = 0.85
-    else:
-        prediction = "REAL"
-        confidence = 0.85
+    wavelet_map = generate_wavelet_map(img_np)
+
+    entropy_hist = generate_entropy_histogram(img_np)
+
+    geometry_map = generate_geometry_map(img_np)
+
+
+    st.subheader("Analysis Results")
+
+    col1,col2 = st.columns(2)
+
+    with col1:
+
+        st.image(
+            img_np,
+            caption=f"Original Image\nPrediction: {prediction}\nConfidence: {confidence*100:.2f}%",
+            use_container_width=True
+        )
+
+        st.image(
+            wavelet_map,
+            caption="Wavelet High Frequency Map",
+            use_container_width=True
+        )
+
+    with col2:
+
+        fig,ax = plt.subplots()
+
+        ax.plot(entropy_hist)
+
+        ax.set_title("Entropy Histogram")
+
+        ax.set_xlabel("Pixel Intensity")
+
+        ax.set_ylabel("Frequency")
+
+        st.pyplot(fig)
+
+        st.image(
+            geometry_map,
+            caption="Geometry / Edge Map",
+            use_container_width=True
+        )
+
 
     # =============================
-    # RESULT
+    # FEATURE VALUES
     # =============================
 
-    st.subheader("Prediction Result")
+    features = extract_features(img_np)
 
-    if prediction == "REAL":
-        st.success("REAL IMAGE")
-    else:
-        st.error("FAKE IMAGE")
+    st.subheader("Extracted Statistical Features")
 
-    st.write(f"Confidence: {confidence:.2f}")
+    for k,v in features.items():
 
-    # =============================
-    # FEATURE DISPLAY
-    # =============================
-
-    st.subheader("Feature Values")
-
-    st.write(f"Entropy: {entropy:.3f}")
-    st.write(f"Wavelet Energy: {wavelet:.2f}")
-    st.write(f"Aspect Ratio: {ratio:.2f}")
-
-    # =============================
-    # VISUALIZATION
-    # =============================
-
-    st.subheader("Feature Visualization")
-
-    labels = ["Entropy", "Wavelet Energy", "Aspect Ratio"]
-    values = [entropy, wavelet, ratio]
-
-    fig, ax = plt.subplots()
-    ax.bar(labels, values)
-    ax.set_ylabel("Value")
-
-    st.pyplot(fig)
-
-    # =============================
-    # EXPLANATION
-    # =============================
-
-    st.subheader("Explanation")
-
-    st.markdown("""
-- **Entropy**: Measures randomness (fake images often less natural)
-- **Wavelet Energy**: Detects high-frequency artifacts
-- **Aspect Ratio**: Checks geometric consistency
-""")
+        st.write(f"{k}: {v:.4f}")
